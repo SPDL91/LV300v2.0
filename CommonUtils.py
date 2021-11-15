@@ -1,10 +1,13 @@
 import configparser
+import json
 import time
 import pika
 from os import sep, path, makedirs
 import logging
 import logging.handlers
 from pika.exceptions import *
+from datetime import datetime
+import ciso8601
 
 
 def init_logs(config, name):
@@ -66,7 +69,27 @@ def connect_rabbitmq(logger, config, process_name):
             time.sleep(3)
 
 
+def decode_json_message(json_message):
+    message = json.loads(json_message).split('#$#')
+    return message
+
+
+def check_message_age(message_timestring, config, logger):
+    now = datetime.now()
+    message_timestamp = ciso8601.parse_datetime(message_timestring)
+    difference = (now - message_timestamp).seconds
+    discard_limit = int(config['SETTINGS']['RMQ_DISCARD_LIMIT'])
+    if difference > discard_limit:
+        logger.debug('Message age ' + str(difference) + ' seconds exceeds config RMQ_DISCARD_LIMIT of ' + str(discard_limit) + ' seconds')
+        logger.debug('Message will be discarded')
+        return True
+    else:
+        return False
+
+
 if __name__ == '__main__':
     test_config = load_main_config()
     test_logger = init_logs(test_config, 'UTIL_TEST')
     rmq_channel = connect_rabbitmq(test_logger, test_config, 'UTIL_TEST')
+    timestring = '2021-11-14 21:31:08.575265'
+    check_message_age(timestring, test_config, test_logger)

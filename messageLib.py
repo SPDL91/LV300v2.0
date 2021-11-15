@@ -109,7 +109,6 @@ def write_image(image_data, image_number, config, logger, name_holder, camera_id
     with open(image_save_path, 'w+b') as file:
         file.write(image_data)
 
-
 def write_csv(decoded, config, logger, image_one_name, image_two_name):
     try:
         date, timestamp, terminal_number, plate, confidence = decoded[6], decoded[7], decoded[4], decoded[8], decoded[9]

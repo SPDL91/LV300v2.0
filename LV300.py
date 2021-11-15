@@ -1,11 +1,10 @@
-import json
 import queue
 import socket
 from threading import Thread
 import time
 from messageLib import *
 import pika
-from CommonUtils import connect_rabbitmq
+from CommonUtils import *
 
 image_name_holder = {}
 
@@ -20,6 +19,8 @@ def message_handler(client_socket, logger, camera_ip, config, camera_id):
         socket_receive_thread = Thread(target=socket_reader, args=(client_socket, q, logger,))
         socket_receive_thread.start()
         while True:
+            if params_set:
+                check_output_trigger_queue(client_socket, camera_id, config, output_params, channel, logger)
             try:
                 received_message = q.get(block=False)
                 if isinstance(received_message, str):
@@ -39,19 +40,18 @@ def message_handler(client_socket, logger, camera_ip, config, camera_id):
                     params_set = True
                 logger.debug("Received message: " + str(decoded))
                 message_code = decoded[3].upper()
-                check_output_trigger_queue(camera_id, config, output_params, channel)
                 if message_code == "KA":  # Keep Alive
                     KA(client_socket, decoded, logger)
                 elif message_code == "EP":
                     XP(client_socket, decoded, config, camera_ip, logger, channel, camera_id)
                 elif message_code == "XP":
                     XP(client_socket, decoded, config, camera_ip, logger, channel, camera_id)
-                elif message_code == "AI" or decoded[3].upper() == "AI":
+                elif message_code == "AI" or message_code == "XI":
                     XI(client_socket, decoded, image_data, config, logger, camera_id)
                 else:  # Camera has sent ACK
                     pass
             time.sleep(0.01)
-    except Exception as ex:
+    except ValueError as ex:
         logger.warning("Exception occurred: " + str(ex))
         logger.warning("Closing socket to reconnect")
         client_socket.close()
@@ -92,7 +92,7 @@ def KA(client_socket, decoded, logger):
 def XP(client_socket, decoded, config, camera_ip, logger, channel, camera_id):
     image_one_name, image_two_name = generate_image_names(decoded, camera_id)
     logger.info('Received PlateData message')
-    check_allowed_access(decoded[8], datetime.datetime.now(), camera_id, channel, image_one_name, image_two_name, logger, config)
+    check_allowed_access(decoded[8], datetime.now(), camera_id, channel, image_one_name, image_two_name, logger, config)
     ack(decoded, client_socket, logger)
     if config['LV300']['WRITE_CSV'] == 'True':
         logger.info('writing transit to CSV file')
@@ -116,15 +116,27 @@ def XI(client_socket, decoded, image_data, config, logger, camera_id):
     elif int(decoded[6]) >= 2:
         image1, image2 = split_image(image_data, 2)
         image1, image2 = demask_image(image1), demask_image(image2)
-        write_image(image1, 1, config, logger, image_name_holder, camera_id)
-        write_image(image2, 2, config, logger, image_name_holder, camera_id)
-        del image_name_holder[camera_id + '_1']
-        del image_name_holder[camera_id + '_2']
+        try:
+            write_image(image1, 1, config, logger, image_name_holder, camera_id)
+            write_image(image2, 2, config, logger, image_name_holder, camera_id)
+            del image_name_holder[camera_id + '_1']
+            del image_name_holder[camera_id + '_2']
+        except KeyError:
+            logger.critical('KeyError when building image save path - XI/AI message may be received out of order')
         ack(decoded, client_socket, logger)
 
 
-def DA(client_socket, output, config):
-    pass
+def DA(client_socket, output, output_params, logger):
+    output_time = 1000
+    if output == '000':
+        output_time = str(output_params['out_0_pulse'])
+    elif output == '001':
+        output_time = str(output_params['out_1_pulse'])
+    reply = "\x02000000035" + output_params['protocol'] + \
+            "000DA" + output_params['terminal_id'] + output + 'E' + output_time.rjust(6, '0')[:6] + "\x03\x04"
+    client_socket.send(bytes(reply, 'utf-8'))
+    logger.debug(reply)
+    logger.info('Triggered output ' + output + ' for ' + output_time + 'ms')
 
 
 def check_allowed_access(rego, passage_datetime, camera_id, channel, image_one_name, image_two_name, logger, config):
@@ -182,5 +194,11 @@ def set_output_params(decoded, config, camera_id):
     return output_params
 
 
-def check_output_trigger_queue(camera_id, config, output_params, channel):
-    pass
+def check_output_trigger_queue(client_socket, camera_id, config, output_params, channel, logger):
+    method_frame, header_frame, body = channel.basic_get(queue=config[camera_id]['TRIGGER_QUEUE'])
+    if method_frame is None:
+        pass
+    else:
+        channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+        output = (decode_json_message(body))[0]
+        DA(client_socket, output, output_params, logger)
